@@ -1,0 +1,147 @@
+# Nexus Professional Network — Local Development Environment
+# Usage: docker compose -f infrastructure/docker-compose.yml up -d
+
+services:
+  # ─────────────────────────────────────────────────
+  # CockroachDB — User Profiles & Auth (ACID, geo-partitioning ready)
+  # ─────────────────────────────────────────────────
+  cockroachdb:
+    image: cockroachdb/cockroach:v23.2.12
+    container_name: nexus-cockroachdb
+    command: start-single-node --insecure --store=attrs=ssd,path=/cockroach/cockroach-data --advertise-addr=cockroachdb
+    ports:
+      - "26257:26257"   # SQL
+      - "8090:8080"     # Admin UI
+    volumes:
+      - cockroachdb_data:/cockroach/cockroach-data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health?ready=1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus-network
+
+  # Initialize CockroachDB database
+  cockroachdb-init:
+    image: cockroachdb/cockroach:v23.2.12
+    container_name: nexus-cockroachdb-init
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    command: >
+      sql --insecure --host=cockroachdb --execute="
+        CREATE DATABASE IF NOT EXISTS nexus;
+        CREATE USER IF NOT EXISTS nexus_app;
+        GRANT ALL ON DATABASE nexus TO nexus_app;
+      "
+    networks:
+      - nexus-network
+
+  # ─────────────────────────────────────────────────
+  # Redis 7 — Session, Cache, Rate Limiting, Pub/Sub
+  # ─────────────────────────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    container_name: nexus-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus-network
+
+  # ─────────────────────────────────────────────────
+  # Neo4j 5 — Social Graph (connections, skills, companies)
+  # ─────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5-community
+    container_name: nexus-neo4j
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt protocol
+    environment:
+      - NEO4J_AUTH=neo4j/nexus_dev_password
+      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+      - NEO4J_dbms_memory_heap_max__size=1G
+      - NEO4J_dbms_memory_pagecache_size=512M
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - nexus-network
+
+  # ─────────────────────────────────────────────────
+  # Elasticsearch 8 — Full-text & Semantic Search
+  # ─────────────────────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
+    container_name: nexus-elasticsearch
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.name=nexus-search
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\\|yellow\"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - nexus-network
+
+  # ─────────────────────────────────────────────────
+  # MongoDB 7 — Media Metadata, Flexible Schema
+  # ─────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7.0
+    container_name: nexus-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=nexus_media
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus-network
+
+volumes:
+  cockroachdb_data:
+    driver: local
+  redis_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  mongodb_data:
+    driver: local
+
+networks:
+  nexus-network:
+    driver: bridge
+    name: nexus-network
