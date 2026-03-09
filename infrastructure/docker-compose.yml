@@ -1,124 +1,87 @@
-# Nexus Professional Network — Local Development Environment
-# Usage: docker compose -f infrastructure/docker-compose.yml up -d
+# Nexus — Docker Compose Development Environment
+# Run: docker compose -f infrastructure/docker-compose.yml up -d
 
 services:
-  # ─────────────────────────────────────────────────
-  # CockroachDB — User Profiles & Auth (ACID, geo-partitioning ready)
-  # ─────────────────────────────────────────────────
+  # ── CockroachDB (SQL) ──────────────────────
   cockroachdb:
     image: cockroachdb/cockroach:v23.2.12
-    container_name: nexus-cockroachdb
-    command: start-single-node --insecure --store=attrs=ssd,path=/cockroach/cockroach-data --advertise-addr=cockroachdb
+    command: start-single-node --insecure --store=attrs=ssd,path=/cockroach/cockroach-data
     ports:
-      - "26257:26257"   # SQL
-      - "8090:8080"     # Admin UI
+      - "26257:26257" # SQL
+      - "8085:8080" # Admin UI
     volumes:
-      - cockroachdb_data:/cockroach/cockroach-data
+      - cockroach-data:/cockroach/cockroach-data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health?ready=1"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health?ready=1" ]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
     networks:
       - nexus-network
 
-  # Initialize CockroachDB database
-  cockroachdb-init:
-    image: cockroachdb/cockroach:v23.2.12
-    container_name: nexus-cockroachdb-init
-    depends_on:
-      cockroachdb:
-        condition: service_healthy
-    command: >
-      sql --insecure --host=cockroachdb --execute="
-        CREATE DATABASE IF NOT EXISTS nexus;
-        CREATE USER IF NOT EXISTS nexus_app;
-        GRANT ALL ON DATABASE nexus TO nexus_app;
-      "
-    networks:
-      - nexus-network
-
-  # ─────────────────────────────────────────────────
-  # Redis 7 — Session, Cache, Rate Limiting, Pub/Sub
-  # ─────────────────────────────────────────────────
+  # ── Redis (Cache + Sessions) ───────────────
   redis:
     image: redis:7.4-alpine
-    container_name: nexus-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
-      - redis_data:/data
+      - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
       retries: 5
     networks:
       - nexus-network
 
-  # ─────────────────────────────────────────────────
-  # Neo4j 5 — Social Graph (connections, skills, companies)
-  # ─────────────────────────────────────────────────
+  # ── Neo4j (Graph DB) ──────────────────────
   neo4j:
     image: neo4j:5-community
-    container_name: nexus-neo4j
     ports:
-      - "7474:7474"   # Browser UI
-      - "7687:7687"   # Bolt protocol
+      - "7474:7474" # Browser
+      - "7687:7687" # Bolt
     environment:
-      - NEO4J_AUTH=neo4j/nexus_dev_password
-      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
-      - NEO4J_dbms_memory_heap_max__size=1G
-      - NEO4J_dbms_memory_pagecache_size=512M
+      - NEO4J_AUTH=neo4j/nexus-dev-password
+      - NEO4J_PLUGINS=["graph-data-science"]
     volumes:
-      - neo4j_data:/data
-      - neo4j_logs:/logs
+      - neo4j-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      test: [ "CMD", "neo4j", "status" ]
       interval: 10s
-      timeout: 10s
-      retries: 5
+      timeout: 5s
+      retries: 10
     networks:
       - nexus-network
 
-  # ─────────────────────────────────────────────────
-  # Elasticsearch 8 — Full-text & Semantic Search
-  # ─────────────────────────────────────────────────
+  # ── Elasticsearch (Search) ─────────────────
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
-    container_name: nexus-elasticsearch
     ports:
       - "9200:9200"
-      - "9300:9300"
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
-      - xpack.security.http.ssl.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-      - cluster.name=nexus-search
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
     volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
+      - elastic-data:/usr/share/elasticsearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\\|yellow\"'"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
+      test: [ "CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -vq '\"status\":\"red\"'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - nexus-network
 
-  # ─────────────────────────────────────────────────
-  # MongoDB 7 — Media Metadata, Flexible Schema
-  # ─────────────────────────────────────────────────
+  # ── MongoDB (Media Metadata) ───────────────
   mongodb:
-    image: mongo:7.0
-    container_name: nexus-mongodb
+    image: mongo:7
     ports:
       - "27017:27017"
     environment:
-      - MONGO_INITDB_DATABASE=nexus_media
+      - MONGO_INITDB_DATABASE=nexus
     volumes:
-      - mongodb_data:/data/db
+      - mongo-data:/data/db
     healthcheck:
       test: echo 'db.runCommand("ping").ok' | mongosh --quiet
       interval: 10s
@@ -127,21 +90,68 @@ services:
     networks:
       - nexus-network
 
+  # ── Backend Services ───────────────────────
+
+  user-service:
+    build:
+      context: ../services/user-service
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgresql://root@cockroachdb:26257/nexus?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=dev-secret-change-in-production
+      - GIN_MODE=debug
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nexus-network
+
+  feed-service:
+    build:
+      context: ../services/feed-service
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - DATABASE_URL=postgresql://root@cockroachdb:26257/nexus?sslmode=disable
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=dev-secret-change-in-production
+      - GIN_MODE=debug
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    networks:
+      - nexus-network
+
+  messaging-service:
+    build:
+      context: ../services/messaging-service
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - DATABASE_URL=postgresql://root@cockroachdb:26257/nexus?sslmode=disable
+      - JWT_SECRET=dev-secret-change-in-production
+      - GIN_MODE=debug
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+    networks:
+      - nexus-network
+
 volumes:
-  cockroachdb_data:
-    driver: local
-  redis_data:
-    driver: local
-  neo4j_data:
-    driver: local
-  neo4j_logs:
-    driver: local
-  elasticsearch_data:
-    driver: local
-  mongodb_data:
-    driver: local
+  cockroach-data:
+  redis-data:
+  neo4j-data:
+  elastic-data:
+  mongo-data:
+
 
 networks:
   nexus-network:
     driver: bridge
-    name: nexus-network
